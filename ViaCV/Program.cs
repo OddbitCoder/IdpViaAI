@@ -1,35 +1,46 @@
-﻿using System.Drawing;
+﻿//#define TEST_SAMPLE
+
+using System.Drawing;
 using System.Drawing.Imaging;
 
 // settings
 
-int thresh = 50; // lower thresh, less vias 
-int centerW = 3; // how much do we weight center more than rim? (1 = both equally)
+const int thresh = 50; // determines good via candidates (results in less vias if lower) 
+const int centerW = 3; // how much do we weigh the center more than the rim? (1 = both equally, >1 = center is weighed higher)
 
-int iter = 1;// 2; // less iterations, less vias but ofc faster
-int take = 2; // more here, less vias
+#if TEST_SAMPLE
+const int iter = 3; // the number of self-training iterations (results in less vias if lower)
+#else
+const int iter = 1;
+#endif
+const int take = 2; // take top N closest vias when computing average similarity (results in less vias if higher)
 
-int clashThresh = 4;
+const int maskViolThresh = 4; // tolerance to violating the mask (less tolerant if lower)
 
-// leave as is (for now)
+const int smear = 8; // propagates a weight in a feature vector to its neighboring dimensions (results in less vias if lower)
 
-int smear = 8;// 5; // lower smear, less vias 
+const int conflDiam = 20; // conflict diameter (vias are allowed to lie closer together if lower)
+const int dVia = 28; // via copper diameter
+const int dHole = 18; // via hole diameter
 
-int conflDiam = 20; // lower conflict diameter => vias are allowed to lie closer together
-int dVia = 28; // via diameter
-int dHole = 18; // via "hole" diameter
+#if TEST_SAMPLE
+const string basePath = @"C:\Work\ViaCV\data\sample\";
+const string baseFlNm = "front-300dpi-test";
+const string maskFlNm = "mask-300dpi-test.png";
+#else
+const string basePath = @"C:\Work\ViaCV\data\";
+const string baseFlNm = "front-300dpi";
+const string maskFlNm = "mask-300dpi.png";
+#endif
 
-double Similarity(double[] v1, double[] v2)
+// dot product similarity measure (since vectors are normalized, this is effectively cosine similarity measure)
+static double Similarity(double[] v1, double[] v2)
 {
-    double s = 0;
-    for (int i = 0; i < v1.Length; i++)
-    { 
-        s += v1[i] * v2[i];
-    }
-    return s;
+    return v1.Select((x, i) => x * v2[i]).Sum();
 }
 
-void AddToVec(double[] vec, int pos, int w)
+// adds weight w to position/dimension pos in vec, and smears it 
+static void AddToVec(double[] vec, int pos, int w)
 {
     int from = Math.Max(0, pos - smear);
     int to = Math.Min(vec.Length - 1, pos + smear);
@@ -39,34 +50,27 @@ void AddToVec(double[] vec, int pos, int w)
     }
 }
 
-// load image
-//var img = Image.FromFile(@"C:\Users\miha\Desktop\vezje-idp\v4\sample\front-300dpi-test.jpg");
-var img = Image.FromFile(@"C:\Users\miha\Desktop\vezje-idp\v4\front-300dpi.jpg");
-
-// load TH tabu image
-//var thTabu = (Bitmap)Image.FromFile(@"C:\Users\miha\Desktop\vezje-idp\v4\sample\test-mask-300dpi.png");
-var thTabu = (Bitmap)Image.FromFile(@"C:\Users\miha\Desktop\vezje-idp\v4\mask-300dpi.png");
-
-double[] ComputeFeatureVector(Bitmap bmp, int _x, int _y, int d1, int d2, out int thClash, int thClashLimit = Int32.MaxValue)
+// computes a feature vector for the dVia x dVia square at (_x,_y); stops if the mask is violated [too much] 
+static double[] ComputeFeatureVector(Bitmap img, Bitmap mask, int _x, int _y, out int maskViol, int maskViolLimit = int.MaxValue)
 {
-    thClash = 0;
+    maskViol = 0;
     var vec = new double[256 * 3 * 2];
-    var c = (x: _x + d1/2d, y: _y + d1/2d);
-    for (int x = _x; x < _x + d1; x++)
+    var c = (x: _x + dVia/2d, y: _y + dVia/2d);
+    for (int x = _x; x < _x + dVia; x++)
     {
-        for (int y = _y; y < _y + d1; y++) 
+        for (int y = _y; y < _y + dVia; y++) 
         {
             var pt = (x: (double)x, y: (double)y);
-            // dist p to c
+            // dist pt to c
             double d = Math.Sqrt(Math.Pow(pt.x - c.x, 2) + Math.Pow(pt.y - c.y, 2));
-            if (d <= d1 / 2d)
+            if (d <= dVia / 2d)
             {
-                thClash += thTabu.GetPixel(x, y).R > 128 ? 1 : 0;
-                if (thClash >= thClashLimit) { return null; }
+                maskViol += mask.GetPixel(x, y).R > 128 ? 1 : 0;
+                if (maskViol >= maskViolLimit) { return null; }
             }
-            if (d <= d2/2d) // inner circle 
+            if (d <= dHole/2d) // inner circle 
             {
-                var px = bmp.GetPixel(x, y);
+                var px = img.GetPixel(x, y);
                 // R
                 AddToVec(vec, px.R / 1 + 256 * 0, centerW);
                 // G
@@ -74,9 +78,9 @@ double[] ComputeFeatureVector(Bitmap bmp, int _x, int _y, int d1, int d2, out in
                 // B
                 AddToVec(vec, px.B / 1 + 256 * 2, centerW);
             } 
-            else if (d <= d1/2d) // outer rim
+            else if (d <= dVia/2d) // outer rim
             {
-                var px = bmp.GetPixel(x, y);
+                var px = img.GetPixel(x, y);
                 // R
                 AddToVec(vec, px.R / 1 + 256 * 3, 1);
                 // G
@@ -86,35 +90,38 @@ double[] ComputeFeatureVector(Bitmap bmp, int _x, int _y, int d1, int d2, out in
             }
         }   
     }
-    // norm
-    double len = 0;
-    for (int i = 0; i < vec.Length; i++)
-    {
-        len += vec[i] * vec[i];
-    }
-    len = Math.Sqrt(len);
-    for (int i = 0; i < vec.Length; i++)
-    {
-        vec[i] /= len;
-    }
+    // normalize vector
+    double len = Math.Sqrt(vec.Select(x => x * x).Sum());
+    vec = vec.Select(x => x / len).ToArray();
     return vec;
 }
 
-bool Conflict(int x1, int y1, int x2, int y2, int d)
+// checks if (x1,y1) and (x2,y2) lie closer than d to each other
+static bool Conflict(int x1, int y1, int x2, int y2, int d)
 {
     return Math.Pow(x1 - x2, 2) + Math.Pow(y1 - y2, 2) <= Math.Pow(d, 2); 
 }
 
-//// gold standard for test sample
-//var goldStd = new List<(int x, int y)>
-//{
-//    (396, 86),
-//    (15, 160),
-//    (669, 90),
-//    (758, 89)
-//};
+// filters out all items that are closer than d to any of fixedItems
+static void FilterOut(IEnumerable<(int x, int y)> fixedItems, ref List<(byte sim, double[] vec, int x, int y)> items, int d)
+{
+    var newList = new List<(byte sim, double[] vec, int x, int y)>();
+    items = items
+        .Where(a => !fixedItems.Any(b => Conflict(a.x, a.y, b.x, b.y, d)))
+        .ToList();
+}
 
-// gold standard for front
+#if TEST_SAMPLE
+// gold standard for the test sample
+var goldStd = new List<(int x, int y)>
+{
+    (396, 86),
+    (15, 160),
+    (669, 90),
+    (758, 89)
+};
+#else
+// gold standard for the real scan at 300 dpi (front side)
 var goldStd = new List<(int x, int y)>
 {
     (240, 1133),
@@ -127,76 +134,60 @@ var goldStd = new List<(int x, int y)>
     (1470, 2086),
     (106, 239)
 };
+#endif
 
-var profl = new List<(int x, int y, double[] vec)>();
+// PCB image
+var img = (Bitmap)Image.FromFile(Path.Combine(basePath, $"{baseFlNm}.jpg"));
 
-foreach (var item in goldStd)
-{
-    profl.Add((item.x, item.y, ComputeFeatureVector((Bitmap)img, item.x, item.y, dVia, dHole, out int _)));
-};
+// through-hole tabu mask image
+var mask = (Bitmap)Image.FromFile(Path.Combine(basePath, maskFlNm));
 
-// compare each dVia x dVia square to the profile
-//var r = new Bitmap(img.Width, img.Height);
-//var r = Image.FromFile(@"C:\Users\miha\Desktop\vezje-idp\v4\sample\front-300dpi-test.jpg");
-var r = Image.FromFile(@"C:\Users\miha\Desktop\vezje-idp\v4\front-300dpi.jpg");
+// gold standard profiles (feature vectors)
+var profl = new List<(int x, int y, double[] vec)>(
+    goldStd.Select(a => (a.x, a.y, ComputeFeatureVector(img, mask, a.x, a.y, out int _)))
+);
 
-var vias = new List<(int x, int y, double[] vec)>();
-vias.AddRange(profl);
+// target image (visualizes results)
+var resVis = (Bitmap)Image.FromFile(Path.Combine(basePath, $"{baseFlNm}.jpg"));
+
+// list of vias (results)
+var vias = new List<(int x, int y, double[] vec)>(profl);
+
+// compare each dVia x dVia square in img to profiles
 
 for (int k = 0; k < iter; k++)
 {
-    Console.WriteLine($"iter {k + 1}");
+    Console.WriteLine($"Iter {k + 1}");
 
+    // good via candidates
     var cand = new List<(byte sim, double[] vec, int x, int y)>();
 
     for (int x = 0; x < img.Width - dVia; x++)
     {
         for (int y = 0; y < img.Height - dVia; y++)
         {
-            var vec = ComputeFeatureVector((Bitmap)img, x, y, dVia, dHole, out int thClash, clashThresh);
-            if (thClash >= clashThresh)
-            {
-              //  Console.WriteLine(thClash);
-                continue;
-            }
-            double sim = 0;
-            var sims = profl.Select(x => Similarity(x.vec, vec))
+            var vec = ComputeFeatureVector(img, mask, x, y, out int maskViol, maskViolThresh);
+            // if we violate the mask, we skip this position
+            if (maskViol >= maskViolThresh) { continue; }
+            // compute average similarity
+            double sim = profl.Select(x => Similarity(x.vec, vec))
                 .OrderByDescending(x => x)
-                .Take(take);
-            foreach (var s in sims)
-            {
-                sim += s;
-            }
-            sim /= sims.Count();
+                .Take(take)
+                .Average();
+            // average sim as byte (0..255)
             byte sb = (byte)(Math.Min(sim, 1) * 255d);
+            // via is a good candidate if it passes the thresh
             if (sb >= 255 - thresh) 
             {
                 cand.Add((sb, vec, x, y));
             }
-            ((Bitmap)r).SetPixel(x + 14, y + 14, Color.FromArgb(255, sb, sb, sb));
+            //resVis.SetPixel(x + 14, y + 14, Color.FromArgb(255, sb, sb, sb));
         }
         Console.Write(".");
     }
 
-    var cand2 = new List<(byte sim, double[] vec, int x, int y)>();
-    foreach (var item in cand)
-    {
-        bool confl = false;
-        foreach (var via in vias)
-        {
-            if (Conflict(item.x, item.y, via.x, via.y, conflDiam))
-            {
-                confl = true;
-                break;
-            }
-        }
-        if (!confl)
-        {
-            cand2.Add(item);
-        }
-    }
-    cand = cand2;
-
+    FilterOut(vias.Select(a => (a.x, a.y)), ref cand, conflDiam);
+    
     cand = cand.OrderByDescending(x => x.sim).ToList();
     while (cand.Count > 0)
     {
@@ -206,28 +197,21 @@ for (int k = 0; k < iter; k++)
         // convert it to via
         vias.Add((topCand.x, topCand.y, topCand.vec));
         // remove conflicting candidates
-        cand2 = new List<(byte sim, double[] vec, int x, int y)>();
-        foreach (var item in cand)
-        {
-            if (!Conflict(item.x, item.y, topCand.x, topCand.y, conflDiam))
-            { 
-                cand2.Add(item);
-            }
-        }
-        cand = cand2;
+        FilterOut(new[] { (topCand.x, topCand.y) }, ref cand, conflDiam);
     }
 
+    // "learn" new vias for the next iteration
     profl.Clear();
     profl.AddRange(vias);
-    Console.WriteLine($"profl size: {profl.Count} ");
+    Console.WriteLine($"({profl.Count})");
 
-} // iter
+} // end of iter
 
-// draw vias
+// output the resulting vias
 
-using (var sw = new StreamWriter(@"C:\Users\miha\Desktop\vezje-idp\v4\front-300dpi-cv.txt"))
+using (var sw = new StreamWriter(Path.Combine(basePath, $"{baseFlNm}-cv.txt")))
 {
-    var g = Graphics.FromImage(r);
+    var g = Graphics.FromImage(resVis);
     foreach (var via in vias)
     {
         g.DrawEllipse(Pens.Red, via.x, via.y, dVia, dVia);
@@ -235,5 +219,4 @@ using (var sw = new StreamWriter(@"C:\Users\miha\Desktop\vezje-idp\v4\front-300d
     }
 }
 
-r.Save(@"C:\Users\miha\Desktop\vezje-idp\v4\front-300dpi-cv.jpg", ImageFormat.Png);
-
+resVis.Save(Path.Combine(basePath, $"{baseFlNm}-cv.png"), ImageFormat.Png);
