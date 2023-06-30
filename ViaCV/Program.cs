@@ -50,7 +50,7 @@ static void AddToVec(double[] vec, int pos, int w)
     }
 }
 
-// computes a feature vector for the dVia x dVia square at (_x,_y); stops if the mask is violated [too much] 
+// computes a feature vector for the dVia x dVia square at (_x,_y); stops if the mask is violated 
 static double[] ComputeFeatureVector(Bitmap img, Bitmap mask, int _x, int _y, out int maskViol, int maskViolLimit = int.MaxValue)
 {
     maskViol = 0;
@@ -65,28 +65,18 @@ static double[] ComputeFeatureVector(Bitmap img, Bitmap mask, int _x, int _y, ou
             double d = Math.Sqrt(Math.Pow(pt.x - c.x, 2) + Math.Pow(pt.y - c.y, 2));
             if (d <= dVia / 2d)
             {
+                // abort if we violate the mask
                 maskViol += mask.GetPixel(x, y).R > 128 ? 1 : 0;
                 if (maskViol >= maskViolLimit) { return null; }
-            }
-            if (d <= dHole/2d) // inner circle 
-            {
+                // add weights to the feature vector
+                (int ofs, int w) = d <= dHole / 2d ? (0, centerW) : (3, 1);
                 var px = img.GetPixel(x, y);
                 // R
-                AddToVec(vec, px.R / 1 + 256 * 0, centerW);
+                AddToVec(vec, px.R + 256 * (ofs + 0), w);
                 // G
-                AddToVec(vec, px.G / 1 + 256 * 1, centerW);
+                AddToVec(vec, px.G + 256 * (ofs + 1), w);
                 // B
-                AddToVec(vec, px.B / 1 + 256 * 2, centerW);
-            } 
-            else if (d <= dVia/2d) // outer rim
-            {
-                var px = img.GetPixel(x, y);
-                // R
-                AddToVec(vec, px.R / 1 + 256 * 3, 1);
-                // G
-                AddToVec(vec, px.G / 1 + 256 * 4, 1);
-                // B
-                AddToVec(vec, px.B / 1 + 256 * 5, 1);
+                AddToVec(vec, px.B + 256 * (ofs + 2), w);
             }
         }   
     }
@@ -121,7 +111,7 @@ var goldStd = new List<(int x, int y)>
     (758, 89)
 };
 #else
-// gold standard for the real scan at 300 dpi (front side)
+// gold standard for the real scan at 300 DPI (front side)
 var goldStd = new List<(int x, int y)>
 {
     (240, 1133),
@@ -139,12 +129,12 @@ var goldStd = new List<(int x, int y)>
 // PCB image
 var img = (Bitmap)Image.FromFile(Path.Combine(basePath, $"{baseFlNm}.jpg"));
 
-// through-hole tabu mask image
+// tabu mask image
 var mask = (Bitmap)Image.FromFile(Path.Combine(basePath, maskFlNm));
 
 // gold standard profiles (feature vectors)
 var profl = new List<(int x, int y, double[] vec)>(
-    goldStd.Select(a => (a.x, a.y, ComputeFeatureVector(img, mask, a.x, a.y, out int _)))
+    goldStd.Select(a => (a.x, a.y, ComputeFeatureVector(img, mask, a.x, a.y, out _)))
 );
 
 // target image (visualizes results)
